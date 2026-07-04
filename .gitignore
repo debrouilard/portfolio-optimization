@@ -1,0 +1,57 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment Variables
+.env
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Data
+data/raw/*
+data/processed/*
+
+# Keep folders
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Models
+models/
+
+# Tensorflow
+*.h5
+*.keras
+
+# Temporary files
+*.tmp
+*.bak
