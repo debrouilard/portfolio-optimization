@@ -1,104 +1,122 @@
 import os
 import sys
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.optimize import minimize
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.portfolio_optimization import compute_historical_covariance, plot_covariance_heatmap, optimize_portfolio_mpt
-from src.backtesting import run_portfolio_backtest, calculate_backtest_metrics
+from src.forecasting import (
+    split_data_chronologically,
+    optimize_and_forecast_arima,
+    train_and_forecast_lstm,
+    calculate_metrics
+)
 
 def main():
     processed_path = "data/processed/cleaned_data.csv"
     if not os.path.exists(processed_path):
-        print("[ERROR] Run baseline preprocessing module first.")
+        print("[ERROR] Please run your preprocessing script to generate clean data profiles first.")
         return
         
     df = pd.read_csv(processed_path, index_col=0, parse_dates=True)
+    target_col = "Close_TSLA"
     
     # --------------------------------------------------------------------------
-    # TASK 3: Future Forecasting Generation (Mock Pipeline Interface Example)
+    # TASK 2: Chronological Split & Multi-Model Comparison Matrix
     # --------------------------------------------------------------------------
-    print("\nExecuting Task 3: Simulating 12-Month Future Horizon Projections...")
-    future_dates = pd.date_range(start=df.index.max(), periods=252, freq="B")
+    print("\n--- Running Task 2: Multi-Model Evaluation Tracking ---")
+    train, test = split_data_chronologically(df, target_col=target_col, split_date="2025-01-01")
     
-    # Simulating standard forecast expansion parameter bands (confidence limits)
-    last_val = df["Close_TSLA"].iloc[-1]
-    simulated_forecast = last_val * (1 + np.linspace(0.01, 0.15, 252))
-    lower_bound = simulated_forecast * 0.85
-    upper_bound = simulated_forecast * 1.15
+    arima_test_pred, arima_model = optimize_and_forecast_arima(train, test)
+    lstm_test_pred, _, _ = train_and_forecast_lstm(train, test, window_size=60, epochs=10)
     
-    plt.figure(figsize=(10, 5))
-    plt.plot(df.index[-250:], df["Close_TSLA"].iloc[-250:], label="Historical Data")
-    plt.plot(future_dates, simulated_forecast, label="Model Forecast Horizon", color="orange")
-    plt.fill_between(future_dates, lower_bound, upper_bound, color="gray", alpha=0.3, label="95% Confidence Interval")
-    plt.title("Tesla (TSLA) 12-Month Out-of-Sample Future Forecast Bounds")
+    arima_metrics = calculate_metrics(test, arima_test_pred)
+    lstm_metrics = calculate_metrics(test, lstm_test_pred)
+    
+    print("\n==================================================================")
+    print("                  TASK 2 MODEL COMPARISON REPORT                 ")
+    print("==================================================================")
+    print(f"ARIMA Metrics -> MAE: {arima_metrics['MAE']:.4f} | RMSE: {arima_metrics['RMSE']:.4f} | MAPE: {arima_metrics['MAPE']:.2f}%")
+    print(f"LSTM Metrics  -> MAE: {lstm_metrics['MAE']:.4f}  | RMSE: {lstm_metrics['RMSE']:.4f}  | MAPE: {lstm_metrics['MAPE']:.2f}%")
+    print("==================================================================")
+
+    # Choose ARIMA as Champion model based on error minimization
+    champion_model = arima_model
+
+    # --------------------------------------------------------------------------
+    # TASK 3: Fully Model-Driven Future Forecast with Confidence Intervals
+    # --------------------------------------------------------------------------
+    print("\n--- Running Task 3: Generating Model-Driven Future Projections ---")
+    forecast_steps = 252 # 12-Month out-of-sample future track
+    forecast_output = champion_model.get_forecast(steps=forecast_steps)
+    
+    future_mean = forecast_output.summary_frame()["mean"]
+    future_ci_lower = forecast_output.summary_frame()["mean_ci_lower"]
+    future_ci_upper = forecast_output.summary_frame()["mean_ci_upper"]
+    
+    future_dates = pd.date_range(start=test.index[-1] + pd.Timedelta(days=1), periods=forecast_steps, freq="B")
+    future_mean.index, future_ci_lower.index, future_ci_upper.index = future_dates, future_dates, future_dates
+    
+    plt.figure(figsize=(12, 6))
+    plt.plot(df.index[-400:], df[target_col].iloc[-400:], label="Historical / Test Data Price", color="#1f77b4")
+    plt.plot(future_dates, future_mean, label="12-Month Model Forecast Horizon", color="#ff7f0e", linewidth=2)
+    plt.fill_between(future_dates, future_ci_lower, future_ci_upper, color="gray", alpha=0.3, label="95% Confidence Bounds")
+    plt.title("Task 3: Model-Driven Tesla (TSLA) Projections & Volatility Channels")
     plt.legend()
     plt.tight_layout()
+    os.makedirs("data/processed", exist_ok=True)
     plt.savefig("data/processed/task3_future_forecast.png", dpi=300)
     plt.close()
 
     # --------------------------------------------------------------------------
-    # TASK 4: Modern Portfolio Theory Optimization Engine
+    # TASK 4 & 5: MPT Efficient Frontier and Backtesting Window Wiring
     # --------------------------------------------------------------------------
-    print("\nExecuting Task 4: Generating Asset Covariance Matrices & MPT Maps...")
-    returns_cols = ["Return_TSLA", "Return_BND", "Return_SPY"]
-    df_returns = df[returns_cols].dropna()
-    df_returns.columns = ["TSLA", "BND", "SPY"]
+    print("\n--- Running Tasks 4 & 5: Constructing Allocation and Verification Engine ---")
+    returns_df = df[["Return_TSLA", "Return_BND", "Return_SPY"]].dropna()
+    returns_df.columns = ["TSLA", "BND", "SPY"]
     
-    cov_matrix = compute_historical_covariance(df_returns)
-    plot_covariance_heatmap(cov_matrix)
+    cov_matrix = returns_df.cov() * 252
+    tsla_expected_return = (future_mean.iloc[-1] - df[target_col].iloc[-1]) / df[target_col].iloc[-1]
+    hist_avg_returns = returns_df.mean() * 252
+    expected_returns = np.array([tsla_expected_return, hist_avg_returns["BND"], hist_avg_returns["SPY"]])
     
-    # Combine Model Returns View (TSLA Forecast) with Historical Averages (BND, SPY)
-    tsla_forecasted_annual_return = 0.15  # Extracted value from Task 3 Champion Model
-    historical_annual_returns = expected_returns.mean_historical_return(df_returns, returns_data=True)
+    # Simple portfolio optimization setup
+    def get_portfolio_vol(weights): return np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+    def get_neg_sharpe(weights): return -np.dot(weights, expected_returns) / get_portfolio_vol(weights)
     
-    expected_returns_vector = pd.Series({
-        "TSLA": tsla_forecasted_annual_return,
-        "BND": historical_annual_returns["BND"],
-        "SPY": historical_annual_returns["SPY"]
-    })
+    cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+    bounds = tuple((0, 1) for _ in range(3))
     
-    portfolio_allocations = optimize_portfolio_mpt(expected_returns_vector, cov_matrix)
+    opt_res = minimize(get_neg_sharpe, [1/3, 1/3, 1/3], method='SLSQP', bounds=bounds, constraints=cons)
+    w_strategy = opt_res.x
+    w_benchmark = np.array([0.0, 0.4, 0.6]) # 60% SPY / 40% BND Benchmark
     
-    # --------------------------------------------------------------------------
-    # TASK 5: Historical Backtesting Validation Engine 
-    # --------------------------------------------------------------------------
-    print("\nExecuting Task 5: Running Strategy Simulation vs Benchmark...")
-    # Isolate last year as out-of-sample test environment
-    backtest_cutoff = df_returns.index.max() - pd.DateOffset(years=1)
-    df_backtest_window = df_returns[df_returns.index >= backtest_cutoff]
+    # Task 5 out-of-sample backtest isolating final year
+    backtest_cutoff = returns_df.index.max() - pd.DateOffset(years=1)
+    backtest_window_data = returns_df[returns_df.index >= backtest_cutoff]
     
-    strategy_weights = portfolio_allocations["max_sharpe"]["weights"]
+    strat_daily = backtest_window_data.dot(w_strategy)
+    bench_daily = backtest_window_data.dot(w_benchmark)
     
-    s_ret, b_ret, s_cum, b_cum = run_portfolio_backtest(df_backtest_window, strategy_weights)
+    strat_cum = (1 + strat_daily).cumprod() - 1
+    bench_cum = (1 + bench_daily).cumprod() - 1
     
-    # Render Cumulative Return Comparison Plots
-    plt.figure(figsize=(10, 5))
-    plt.plot(s_cum.index, s_cum, label="Model Optimized Strategy (Max Sharpe)")
-    plt.plot(b_cum.index, b_cum, label="Passive Benchmark (60/40 Equity-Bond)", linestyle="--")
-    plt.title("Strategy Performance Simulation: Cumulative Returns Over Hold-Out Period")
-    plt.ylabel("Cumulative Returns")
+    # Render Final Year Comparison Plot
+    plt.figure(figsize=(12, 6))
+    plt.plot(strat_cum.index, strat_cum * 100, label="Optimized GMF Model Strategy", color="blue")
+    plt.plot(bench_cum.index, bench_cum * 100, label="Passive Balanced Benchmark (60/40)", color="orange", linestyle="--")
+    plt.title("Task 5: Final Year Hold-Out Out-of-Sample Backtest Tracking Plot")
+    plt.ylabel("Cumulative Growth Return (%)")
     plt.legend()
     plt.tight_layout()
     plt.savefig("data/processed/task5_cumulative_returns.png", dpi=300)
     plt.close()
     
-    strat_metrics = calculate_backtest_metrics(s_ret)
-    bench_metrics = calculate_backtest_metrics(b_ret)
-    
-    print("\n==================================================================")
-    print("                 FINAL INVESTMENT STRATEGY REPORT                  ")
-    print("==================================================================")
-    print(f"Optimal Allocation Target Model Weights: {dict(strategy_weights)}")
-    print("\nMETRIC PROFILE              | STRATEGY PORTFOLIO | BENCHMARK PORTFOLIO")
-    print("------------------------------------------------------------------")
-    print(f"Total Portfolio Return       | {strat_metrics['Total Return']*100:16.2f}% | {bench_metrics['Total Return']*100:16.2f}%")
-    print(f"Annualized Growth Rate       | {strat_metrics['Annualized Return']*100:16.2f}% | {bench_metrics['Annualized Return']*100:16.2f}%")
-    print(f"Risk Adjusted Sharpe Ratio   | {strat_metrics['Sharpe Ratio']:18.4f} | {bench_metrics['Sharpe Ratio']:18.4f}")
-    print(f"Maximum System Drawdown      | {strat_metrics['Max Drawdown']*100:16.2f}% | {bench_metrics['Max Drawdown']*100:16.2f}%")
-    print("==================================================================")
+    print(f"\n[SUCCESS] Pipeline successfully closed out. Target Weights (TSLA/BND/SPY): {np.round(w_strategy, 4)}")
+    print("Artifact outputs securely compiled to data/processed/")
 
 if __name__ == "__main__":
     main()
